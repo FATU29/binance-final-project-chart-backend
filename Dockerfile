@@ -3,33 +3,52 @@
 # Stage 1: Build
 FROM node:18-alpine AS builder
 
+# Install curl for network debugging and apk update
+# Note: DNS is automatically handled by Docker, no need to modify /etc/resolv.conf
+RUN apk update && apk add --no-cache curl
+
 WORKDIR /app
 
 # Copy package files
 COPY package*.json ./
 
-# Install all dependencies (including dev dependencies for build)
-RUN npm ci
+# Configure npm for better network handling
+RUN npm config set registry https://registry.npmjs.org/ && \
+    npm config set fetch-retry-mintimeout 20000 && \
+    npm config set fetch-retry-maxtimeout 120000 && \
+    npm config set fetch-retries 5 && \
+    npm config set fetch-timeout 300000
 
-# Copy source code
+# Install all dependencies (including dev dependencies for build) with retries
+RUN npm ci --prefer-offline || npm ci --prefer-offline || npm ci
+
+# Copy all source files and configs (dockerignore will handle exclusions)
 COPY . .
 
-# Build the application
-RUN npm run build
+# Build the application with network retries
+RUN npx nest build || npx nest build || npx nest build
 
 # Stage 2: Production
 FROM node:18-alpine
 
+# Note: DNS is automatically handled by Docker, no need to modify /etc/resolv.conf
 WORKDIR /app
 
-# Install curl for health checks
-RUN apk add --no-cache curl
+# Install curl for health checks with apk update
+RUN apk update && apk add --no-cache curl
 
 # Copy package files
 COPY package*.json ./
 
-# Install only production dependencies
-RUN npm ci --only=production && npm cache clean --force
+# Configure npm for production
+RUN npm config set registry https://registry.npmjs.org/ && \
+    npm config set fetch-retry-mintimeout 20000 && \
+    npm config set fetch-retry-maxtimeout 120000 && \
+    npm config set fetch-retries 5
+
+# Install only production dependencies with retries
+RUN npm ci --only=production --prefer-offline || npm ci --only=production --prefer-offline || npm ci --only=production
+RUN npm cache clean --force
 
 # Copy built application from builder stage
 COPY --from=builder /app/dist ./dist

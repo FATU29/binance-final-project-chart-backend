@@ -2,14 +2,11 @@
 node_modules
 npm-debug.log
 yarn-error.log
-# Keep package-lock.json for npm ci
-# package-lock.json
 yarn.lock
 
-# Build output
+# Build output (keep dist out as we rebuild it)
 dist
 build
-.next
 
 # Testing
 coverage

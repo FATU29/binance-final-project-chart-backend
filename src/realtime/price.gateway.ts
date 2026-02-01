@@ -14,8 +14,8 @@ import { PriceData } from '../binance/binance.types';
 @WebSocketGateway({
   namespace: '/prices',
   cors: {
-    origin: process.env.FRONTEND_URL || '*',
-    credentials: true,
+    origin: '*',
+    credentials: false,
   },
 })
 export class PriceGateway implements OnGatewayConnection, OnGatewayDisconnect {
