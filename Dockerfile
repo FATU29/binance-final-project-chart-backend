@@ -3,9 +3,14 @@
 # Stage 1: Build
 FROM node:18-alpine AS builder
 
-# Install curl for network debugging and apk update
-# Note: DNS is automatically handled by Docker, no need to modify /etc/resolv.conf
-RUN apk update && apk add --no-cache curl
+# Install curl for network debugging (with retry & fallback mirror)
+RUN for i in 1 2 3; do \
+      apk update && apk add --no-cache curl && break; \
+      echo "Retry $i: apk failed, trying fallback mirror..."; \
+      echo 'https://dl-cdn.alpinelinux.org/alpine/v3.21/main' > /etc/apk/repositories && \
+      echo 'https://dl-cdn.alpinelinux.org/alpine/v3.21/community' >> /etc/apk/repositories; \
+      sleep 2; \
+    done || echo 'WARN: curl install skipped (non-critical)'
 
 WORKDIR /app
 
@@ -34,8 +39,14 @@ FROM node:18-alpine
 # Note: DNS is automatically handled by Docker, no need to modify /etc/resolv.conf
 WORKDIR /app
 
-# Install curl for health checks with apk update
-RUN apk update && apk add --no-cache curl
+# Install curl for health checks (with retry & fallback mirror)
+RUN for i in 1 2 3; do \
+      apk update && apk add --no-cache curl && break; \
+      echo "Retry $i: apk failed, trying fallback mirror..."; \
+      echo 'https://dl-cdn.alpinelinux.org/alpine/v3.21/main' > /etc/apk/repositories && \
+      echo 'https://dl-cdn.alpinelinux.org/alpine/v3.21/community' >> /etc/apk/repositories; \
+      sleep 2; \
+    done || echo 'WARN: curl install skipped (non-critical)'
 
 # Copy package files
 COPY package*.json ./
