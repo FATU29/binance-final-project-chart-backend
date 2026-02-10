@@ -15,4 +15,13 @@ export class AppController {
       },
     };
   }
+
+  @Get('health/binance')
+  getBinanceStatus() {
+    return {
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      binance: this.binanceService.getConnectionStatus(),
+    };
+  }
 }

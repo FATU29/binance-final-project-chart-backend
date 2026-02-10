@@ -1,4 +1,9 @@
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  OnModuleInit,
+  OnModuleDestroy,
+} from '@nestjs/common';
 import WebSocket from 'ws';
 import { AppConfigService } from '../config/app-config.service';
 import { RedisService } from '../redis/redis.service';
@@ -44,16 +49,23 @@ export class BinanceStreamService implements OnModuleInit, OnModuleDestroy {
     try {
       const binanceConfig = this.appConfig.binance;
       const streams = binanceConfig.streams.split(',').map((s) => s.trim());
+      
+      // Binance combined streams require forward slashes between stream names
+      // Format: /ws/<stream1>/<stream2>/<stream3>
+      // OR use /stream?streams=<stream1>/<stream2>/<stream3>
       const streamPath = streams.join('/');
 
-      // Combined stream URL
+      // Combined stream URL - use forward slashes to separate streams
       const wsUrl = `${binanceConfig.spotWsBase}/stream?streams=${streamPath}`;
       this.logger.log(`Connecting to Binance WebSocket: ${wsUrl}`);
 
       this.ws = new WebSocket(wsUrl);
 
       this.ws.on('open', () => {
-        this.logger.log('Binance WebSocket connected');
+        this.logger.log('✅ Binance WebSocket connected successfully');
+        this.logger.log(
+          `📡 Listening to ${streams.length} streams from Binance`,
+        );
         this.reconnectAttempts = 0;
       });
 
@@ -108,16 +120,17 @@ export class BinanceStreamService implements OnModuleInit, OnModuleDestroy {
       const priceData = this.extractPriceData(stream, payload);
       if (priceData) {
         this.publishPrice(priceData);
+        // Log first message to confirm connection is working
+        if (this.reconnectAttempts === 0) {
+          this.logger.debug(`📨 Received first message from stream: ${stream}`);
+        }
       }
     } catch (error) {
       this.logger.error('Error handling message', error);
     }
   }
 
-  private extractPriceData(
-    stream: string,
-    payload: any,
-  ): PriceData | null {
+  private extractPriceData(stream: string, payload: any): PriceData | null {
     try {
       let symbol: string;
       let price: string;
@@ -156,7 +169,7 @@ export class BinanceStreamService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async publishPrice(priceData: PriceData) {
-    const { symbol, price, ts } = priceData;
+    const { symbol, price } = priceData;
 
     try {
       // Publish to Redis Pub/Sub
@@ -175,5 +188,31 @@ export class BinanceStreamService implements OnModuleInit, OnModuleDestroy {
 
   isConnected(): boolean {
     return this.ws && this.ws.readyState === WebSocket.OPEN;
+  }
+
+  getConnectionStatus() {
+    if (!this.ws) {
+      return {
+        connected: false,
+        state: 'NOT_INITIALIZED',
+        reconnectAttempts: this.reconnectAttempts,
+        maxReconnectAttempts: this.maxReconnectAttempts,
+      };
+    }
+
+    const states = {
+      [WebSocket.CONNECTING]: 'CONNECTING',
+      [WebSocket.OPEN]: 'OPEN',
+      [WebSocket.CLOSING]: 'CLOSING',
+      [WebSocket.CLOSED]: 'CLOSED',
+    };
+
+    return {
+      connected: this.ws.readyState === WebSocket.OPEN,
+      state: states[this.ws.readyState] || 'UNKNOWN',
+      reconnectAttempts: this.reconnectAttempts,
+      maxReconnectAttempts: this.maxReconnectAttempts,
+      url: this.ws.url || 'N/A',
+    };
   }
 }

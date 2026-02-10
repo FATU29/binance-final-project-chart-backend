@@ -3,73 +3,66 @@
 # Stage 1: Build
 FROM node:18-alpine AS builder
 
-# Install curl for network debugging (with retry & fallback mirror)
-RUN for i in 1 2 3; do \
-      apk update && apk add --no-cache curl && break; \
-      echo "Retry $i: apk failed, trying fallback mirror..."; \
-      echo 'https://dl-cdn.alpinelinux.org/alpine/v3.21/main' > /etc/apk/repositories && \
-      echo 'https://dl-cdn.alpinelinux.org/alpine/v3.21/community' >> /etc/apk/repositories; \
-      sleep 2; \
-    done || echo 'WARN: curl install skipped (non-critical)'
-
 WORKDIR /app
 
 # Copy package files
 COPY package*.json ./
 
-# Configure npm for better network handling
-RUN npm config set registry https://registry.npmjs.org/ && \
-    npm config set fetch-retry-mintimeout 20000 && \
-    npm config set fetch-retry-maxtimeout 120000 && \
-    npm config set fetch-retries 5 && \
-    npm config set fetch-timeout 300000
+# Configure npm registry
+RUN npm config set registry https://registry.npmjs.org/
 
-# Install all dependencies (including dev dependencies for build) with retries
-RUN npm ci --prefer-offline || npm ci --prefer-offline || npm ci
+# Install dependencies (with retry) - include dev dependencies for build
+RUN for i in 1 2 3 4 5; do \
+      npm ci && break || \
+      (echo "npm ci attempt $i failed, retrying in 10s..." && sleep 10); \
+    done || (echo "npm ci failed after 5 attempts" && exit 1)
 
-# Copy all source files and configs (dockerignore will handle exclusions)
+# Verify nest-cli is installed
+RUN test -f node_modules/.bin/nest || (echo "nest-cli not found!" && npm list @nestjs/cli && exit 1)
+
+# Copy source files
 COPY . .
 
-# Build the application with network retries
-RUN npx nest build || npx nest build || npx nest build
+# Build the application - use npx to ensure nest is found
+RUN npx nest build && test -f dist/main.js
 
 # Stage 2: Production
 FROM node:18-alpine
-
-# Note: DNS is automatically handled by Docker, no need to modify /etc/resolv.conf
 WORKDIR /app
 
-# Install curl for health checks (with retry & fallback mirror)
-RUN for i in 1 2 3; do \
-      apk update && apk add --no-cache curl && break; \
-      echo "Retry $i: apk failed, trying fallback mirror..."; \
-      echo 'https://dl-cdn.alpinelinux.org/alpine/v3.21/main' > /etc/apk/repositories && \
-      echo 'https://dl-cdn.alpinelinux.org/alpine/v3.21/community' >> /etc/apk/repositories; \
-      sleep 2; \
-    done || echo 'WARN: curl install skipped (non-critical)'
+# Install curl for health checks (with DNS retry)
+RUN for i in 1 2 3 4 5; do \
+      apk update && apk add --no-cache curl && break || \
+      (echo "Attempt $i failed, retrying in 10s..." && sleep 10); \
+    done
 
 # Copy package files
 COPY package*.json ./
 
-# Configure npm for production
-RUN npm config set registry https://registry.npmjs.org/ && \
-    npm config set fetch-retry-mintimeout 20000 && \
-    npm config set fetch-retry-maxtimeout 120000 && \
-    npm config set fetch-retries 5
+# Configure npm registry
+RUN npm config set registry https://registry.npmjs.org/
 
-# Install only production dependencies with retries
-RUN npm ci --only=production --prefer-offline || npm ci --only=production --prefer-offline || npm ci --only=production
+# Install all dependencies (NestJS needs all deps at runtime)
+RUN for i in 1 2 3 4 5; do \
+      npm ci && break || \
+      (echo "npm ci attempt $i failed, retrying in 10s..." && sleep 10); \
+    done || (echo "npm ci failed after 5 attempts" && exit 1)
 RUN npm cache clean --force
-
-# Copy built application from builder stage
-COPY --from=builder /app/dist ./dist
 
 # Create a non-root user
 RUN addgroup -g 1001 -S nodejs && \
 	adduser -S nestjs -u 1001
 
-# Change ownership of the app directory
-RUN chown -R nestjs:nodejs /app
+# Copy built application with correct ownership (avoids chown later)
+COPY --from=builder --chown=nestjs:nodejs /app/dist ./dist
+RUN test -f dist/main.js
+
+# Verify @nestjs/core is available
+RUN test -d node_modules/@nestjs/core || (echo "@nestjs/core not found in node_modules!" && npm list @nestjs/core && exit 1)
+
+# Change ownership - only chown package.json (dist already has correct ownership from COPY --chown)
+# node_modules can stay owned by root - files are readable by all users
+RUN chown nestjs:nodejs /app/package*.json
 
 # Switch to non-root user
 USER nestjs

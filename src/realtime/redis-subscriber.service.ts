@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { RedisService } from '../redis/redis.service';
 import { PriceGateway } from './price.gateway';
-import { PriceData } from '../binance/binance.types';
+import { PriceData, BinanceKlinePayload } from '../binance/binance.types';
 
 @Injectable()
 export class RedisSubscriberService implements OnModuleInit, OnModuleDestroy {
@@ -44,12 +44,18 @@ export class RedisSubscriberService implements OnModuleInit, OnModuleDestroy {
   private handleMessage(pattern: string, channel: string, message: string) {
     try {
       const priceData: PriceData = JSON.parse(message);
-      const { symbol } = priceData;
+      const { symbol, raw } = priceData;
 
       this.logger.debug(`Received price from Redis channel ${channel}: ${priceData.price}`);
 
-      // Broadcast to WebSocket clients
+      // Broadcast price update (for simple price displays)
       this.priceGateway.broadcastPrice(symbol, priceData);
+
+      // If raw data contains kline data, also broadcast full kline for charting
+      if (raw && raw.e === 'kline') {
+        const klineData = raw as BinanceKlinePayload;
+        this.priceGateway.broadcastKline(symbol, klineData);
+      }
     } catch (error) {
       this.logger.error('Error handling Redis message', error);
     }

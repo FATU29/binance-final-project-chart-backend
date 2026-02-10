@@ -9,7 +9,7 @@ import {
 } from '@nestjs/websockets';
 import { Logger } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
-import { PriceData } from '../binance/binance.types';
+import { PriceData, BinanceKlinePayload } from '../binance/binance.types';
 
 @WebSocketGateway({
   namespace: '/prices',
@@ -74,5 +74,21 @@ export class PriceGateway implements OnGatewayConnection, OnGatewayDisconnect {
       ts: data.ts,
     });
     this.logger.debug(`Broadcast price update to ${room}: ${data.price}`);
+  }
+
+  /**
+   * Broadcast full kline (candlestick) data to clients
+   * Used when clients need full OHLCV data for charting
+   */
+  broadcastKline(symbol: string, klineData: BinanceKlinePayload) {
+    const room = symbol.toUpperCase();
+    // Emit full kline data in Binance format for compatibility
+    this.server.to(room).emit('klineUpdate', {
+      e: klineData.e,
+      E: klineData.E,
+      s: klineData.s,
+      k: klineData.k,
+    });
+    this.logger.debug(`Broadcast kline update to ${room}: ${klineData.k.i}`);
   }
 }
