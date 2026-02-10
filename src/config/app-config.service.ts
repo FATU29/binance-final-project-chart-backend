@@ -32,6 +32,13 @@ export class AppConfigService {
     };
   }
 
+  get mongodbUri(): string {
+    return this.configService.get<string>(
+      'MONGODB_URI',
+      'mongodb://localhost:27017/chart_db',
+    );
+  }
+
   get priceQueueName(): string {
     return this.configService.get<string>('PRICE_QUEUE_NAME', 'price');
   }

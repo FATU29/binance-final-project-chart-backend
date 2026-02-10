@@ -3,11 +3,14 @@ import {
   Logger,
   OnModuleInit,
   OnModuleDestroy,
+  Inject,
+  forwardRef,
 } from '@nestjs/common';
 import WebSocket from 'ws';
 import { AppConfigService } from '../config/app-config.service';
-import { RedisService } from '../redis/redis.service';
 import { PriceQueueService } from '../queues/price/price-queue.service';
+import { PriceGateway } from '../realtime/price.gateway';
+import { BinanceHistoryService } from './binance-history.service';
 import {
   BinanceCombinedStreamMessage,
   BinanceMiniTickerPayload,
@@ -15,6 +18,13 @@ import {
   BinanceKlinePayload,
   PriceData,
 } from './binance.types';
+
+// Throttle interval per symbol for price broadcasts (ms)
+const PRICE_THROTTLE_MS = 200;
+// Throttle interval per symbol+interval for kline broadcasts (ms)
+const KLINE_THROTTLE_MS = 500;
+// Throttle interval per symbol for DB persistence (ms)
+const PERSIST_THROTTLE_MS = 1000;
 
 @Injectable()
 export class BinanceStreamService implements OnModuleInit, OnModuleDestroy {
@@ -25,10 +35,24 @@ export class BinanceStreamService implements OnModuleInit, OnModuleDestroy {
   private readonly maxReconnectAttempts = 10;
   private readonly baseReconnectDelay = 1000;
 
+  // Throttle maps: symbol -> last broadcast timestamp
+  private readonly lastPriceBroadcast = new Map<string, number>();
+  private readonly lastKlineBroadcast = new Map<string, number>();
+  // Pending latest data per symbol (for coalesced broadcast)
+  private readonly pendingPrice = new Map<string, PriceData>();
+  private readonly pendingKline = new Map<string, BinanceKlinePayload>();
+  private throttleTimers = new Map<string, NodeJS.Timeout>();
+  // Throttle map for DB persistence
+  private readonly lastPersist = new Map<string, number>();
+  // Throttle map for kline persistence to MongoDB
+  private readonly lastKlinePersist = new Map<string, number>();
+
   constructor(
     private readonly appConfig: AppConfigService,
-    private readonly redisService: RedisService,
+    @Inject(forwardRef(() => PriceGateway))
+    private readonly priceGateway: PriceGateway,
     private readonly priceQueueService: PriceQueueService,
+    private readonly binanceHistoryService: BinanceHistoryService,
   ) {}
 
   async onModuleInit() {
@@ -40,6 +64,11 @@ export class BinanceStreamService implements OnModuleInit, OnModuleDestroy {
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout);
     }
+    // Clear all throttle timers
+    for (const timer of this.throttleTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.throttleTimers.clear();
     if (this.ws) {
       this.ws.close();
     }
@@ -49,15 +78,15 @@ export class BinanceStreamService implements OnModuleInit, OnModuleDestroy {
     try {
       const binanceConfig = this.appConfig.binance;
       const streams = binanceConfig.streams.split(',').map((s) => s.trim());
-      
-      // Binance combined streams require forward slashes between stream names
-      // Format: /ws/<stream1>/<stream2>/<stream3>
-      // OR use /stream?streams=<stream1>/<stream2>/<stream3>
+
+      // Binance combined streams format: /stream?streams=stream1/stream2/stream3
+      // Streams should be separated by forward slashes
       const streamPath = streams.join('/');
 
-      // Combined stream URL - use forward slashes to separate streams
+      // Combined stream URL - Binance API format
       const wsUrl = `${binanceConfig.spotWsBase}/stream?streams=${streamPath}`;
-      this.logger.log(`Connecting to Binance WebSocket: ${wsUrl}`);
+      this.logger.log(`🔌 Connecting to Binance WebSocket: ${wsUrl}`);
+      this.logger.log(`📊 Streams configured: ${streams.join(', ')}`);
 
       this.ws = new WebSocket(wsUrl);
 
@@ -114,19 +143,18 @@ export class BinanceStreamService implements OnModuleInit, OnModuleDestroy {
 
   private handleMessage(data: WebSocket.Data) {
     try {
-      const message: BinanceCombinedStreamMessage = JSON.parse(data.toString());
-      const { stream, data: payload } = message;
+      const message: BinanceCombinedStreamMessage = JSON.parse(
+        typeof data === 'string' ? data : data.toString(),
+      );
+      const payload = message.data;
+      if (!payload || !payload.e) return;
 
-      const priceData = this.extractPriceData(stream, payload);
+      const priceData = this.extractPriceData(message.stream, payload);
       if (priceData) {
         this.publishPrice(priceData);
-        // Log first message to confirm connection is working
-        if (this.reconnectAttempts === 0) {
-          this.logger.debug(`📨 Received first message from stream: ${stream}`);
-        }
       }
     } catch (error) {
-      this.logger.error('Error handling message', error);
+      this.logger.error('❌ Error handling Binance message', error);
     }
   }
 
@@ -168,22 +196,107 @@ export class BinanceStreamService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async publishPrice(priceData: PriceData) {
-    const { symbol, price } = priceData;
+  private publishPrice(priceData: PriceData) {
+    const { symbol, raw } = priceData;
+    const now = Date.now();
+    const isKline = raw && raw.e === 'kline';
 
-    try {
-      // Publish to Redis Pub/Sub
-      const channel = `prices:${symbol}`;
-      const message = JSON.stringify(priceData);
-      await this.redisService.publish(channel, message);
+    if (isKline) {
+      // Throttle kline broadcasts per symbol+interval
+      const klineData = raw as BinanceKlinePayload;
+      const klineKey = `${symbol}:${klineData.k.i}`;
+      const lastKline = this.lastKlineBroadcast.get(klineKey) || 0;
 
-      // Add job to BullMQ
-      await this.priceQueueService.addPersistPriceJob(priceData);
+      this.pendingKline.set(klineKey, klineData);
+      // Also store latest price for this symbol
+      this.pendingPrice.set(symbol, priceData);
 
-      this.logger.debug(`Published price for ${symbol}: ${price}`);
-    } catch (error) {
-      this.logger.error(`Error publishing price for ${symbol}`, error);
+      if (now - lastKline >= KLINE_THROTTLE_MS) {
+        this.lastKlineBroadcast.set(klineKey, now);
+        this.priceGateway.broadcastKline(symbol, klineData);
+        // Also broadcast price from kline
+        this.lastPriceBroadcast.set(symbol, now);
+        this.priceGateway.broadcastPrice(symbol, priceData);
+      } else {
+        this.scheduleThrottledBroadcast(
+          klineKey,
+          symbol,
+          KLINE_THROTTLE_MS - (now - lastKline),
+        );
+      }
+
+      // Persist kline to MongoDB:
+      // - Closed klines (x=true): always persist immediately
+      // - Open klines: throttle to every 5 seconds
+      const KLINE_PERSIST_THROTTLE_MS = 5000;
+      const lastKlinePersistTime = this.lastKlinePersist.get(klineKey) || 0;
+
+      if (
+        klineData.k.x ||
+        now - lastKlinePersistTime >= KLINE_PERSIST_THROTTLE_MS
+      ) {
+        this.lastKlinePersist.set(klineKey, now);
+        this.binanceHistoryService
+          .persistKlineFromStream(symbol, klineData.k.i, klineData.k)
+          .catch((err) => {
+            this.logger.error(`❌ Kline persist error for ${klineKey}`, err);
+          });
+      }
+    } else {
+      // Throttle price broadcasts per symbol
+      const lastPrice = this.lastPriceBroadcast.get(symbol) || 0;
+      this.pendingPrice.set(symbol, priceData);
+
+      if (now - lastPrice >= PRICE_THROTTLE_MS) {
+        this.lastPriceBroadcast.set(symbol, now);
+        this.priceGateway.broadcastPrice(symbol, priceData);
+      } else if (!this.throttleTimers.has(`price:${symbol}`)) {
+        // Schedule broadcast of latest data after throttle window
+        const delay = PRICE_THROTTLE_MS - (now - lastPrice);
+        const timer = setTimeout(() => {
+          this.throttleTimers.delete(`price:${symbol}`);
+          const latest = this.pendingPrice.get(symbol);
+          if (latest) {
+            this.lastPriceBroadcast.set(symbol, Date.now());
+            this.priceGateway.broadcastPrice(symbol, latest);
+          }
+        }, delay);
+        this.throttleTimers.set(`price:${symbol}`, timer);
+      }
     }
+
+    // Throttle DB persistence — at most once per PERSIST_THROTTLE_MS per symbol
+    const lastPersistTime = this.lastPersist.get(symbol) || 0;
+    if (now - lastPersistTime >= PERSIST_THROTTLE_MS) {
+      this.lastPersist.set(symbol, now);
+      this.priceQueueService.addPersistPriceJob(priceData).catch((err) => {
+        this.logger.error(`❌ Queue error for ${symbol}`, err);
+      });
+    }
+  }
+
+  private scheduleThrottledBroadcast(
+    klineKey: string,
+    symbol: string,
+    delay: number,
+  ) {
+    const timerKey = `kline:${klineKey}`;
+    if (this.throttleTimers.has(timerKey)) return;
+
+    const timer = setTimeout(() => {
+      this.throttleTimers.delete(timerKey);
+      const latestKline = this.pendingKline.get(klineKey);
+      const latestPrice = this.pendingPrice.get(symbol);
+      if (latestKline) {
+        this.lastKlineBroadcast.set(klineKey, Date.now());
+        this.priceGateway.broadcastKline(symbol, latestKline);
+      }
+      if (latestPrice) {
+        this.lastPriceBroadcast.set(symbol, Date.now());
+        this.priceGateway.broadcastPrice(symbol, latestPrice);
+      }
+    }, delay);
+    this.throttleTimers.set(timerKey, timer);
   }
 
   isConnected(): boolean {

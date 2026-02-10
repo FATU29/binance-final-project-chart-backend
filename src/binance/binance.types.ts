@@ -65,3 +65,44 @@ export interface PriceData {
   ts: number;
   raw: any;
 }
+
+// Historical kline data from Binance REST API
+// Response format: [openTime, open, high, low, close, volume, closeTime, quoteVolume, trades, takerBuyBaseVolume, takerBuyQuoteVolume, ignore]
+export type BinanceKlineData = [
+  number, // Open time
+  string, // Open
+  string, // High
+  string, // Low
+  string, // Close
+  string, // Volume
+  number, // Close time
+  string, // Quote asset volume
+  number, // Number of trades
+  string, // Taker buy base asset volume
+  string, // Taker buy quote asset volume
+  string, // Ignore
+];
+
+// Normalized historical kline for API response
+export interface HistoricalKline {
+  openTime: number;
+  open: string;
+  high: string;
+  low: string;
+  close: string;
+  volume: string;
+  closeTime: number;
+  quoteVolume: string;
+  trades: number;
+  takerBuyBaseVolume: string;
+  takerBuyQuoteVolume: string;
+}
+
+// Query parameters for historical data
+export interface HistoricalDataQuery {
+  symbol: string;
+  interval: string; // 1m, 5m, 15m, 1h, 4h, 1d, 1w, 1M
+  startTime?: number;
+  endTime?: number;
+  limit?: number; // Default 500, max 1000
+}

@@ -35,45 +35,153 @@ export class PriceGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @SubscribeMessage('subscribe')
   handleSubscribe(
     @ConnectedSocket() client: Socket,
-    @MessageBody() payload: { symbol: string },
+    @MessageBody() payload: { symbol: string } | string,
   ) {
-    const { symbol } = payload;
-    if (!symbol) {
-      return { error: 'Symbol is required' };
+    try {
+      if (!this.server) {
+        this.logger.error('❌ Server not initialized');
+        return {
+          status: 'error',
+          message: 'Server not initialized',
+        };
+      }
+
+      // Handle both object and string payload formats
+      let symbol: string;
+      if (typeof payload === 'string') {
+        try {
+          const parsed = JSON.parse(payload);
+          symbol = parsed.symbol;
+        } catch {
+          symbol = payload;
+        }
+      } else if (payload && typeof payload === 'object') {
+        symbol = payload.symbol;
+      } else {
+        this.logger.warn(
+          `⚠️  Client ${client.id} attempted subscribe with invalid payload:`,
+          payload,
+        );
+        return {
+          status: 'error',
+          message: 'Invalid payload format. Expected { symbol: string }',
+        };
+      }
+
+      if (!symbol || typeof symbol !== 'string') {
+        this.logger.warn(
+          `⚠️  Client ${client.id} attempted subscribe without symbol`,
+        );
+        return {
+          status: 'error',
+          message: 'Symbol is required',
+        };
+      }
+
+      const room = symbol.toUpperCase();
+      client.join(room);
+
+      let clientCount = 0;
+      try {
+        const adapter = this.server.adapter as any;
+        const roomSet = adapter?.rooms?.get(room);
+        clientCount = roomSet ? roomSet.size : 0;
+      } catch (error) {
+        this.logger.warn(`Could not get client count for room ${room}`, error);
+      }
+
+      this.logger.log(
+        `✅ Client ${client.id} subscribed to ${room} (${clientCount} total clients in room)`,
+      );
+
+      return {
+        status: 'success',
+        message: `Subscribed to ${room}`,
+        symbol: room,
+      };
+    } catch (error) {
+      this.logger.error(
+        `❌ Error in handleSubscribe for client ${client.id}`,
+        error,
+      );
+      return {
+        status: 'error',
+        message:
+          error instanceof Error ? error.message : 'Internal server error',
+      };
     }
-
-    const room = symbol.toUpperCase();
-    client.join(room);
-    this.logger.log(`Client ${client.id} subscribed to ${room}`);
-
-    return { success: true, message: `Subscribed to ${room}` };
   }
 
   @SubscribeMessage('unsubscribe')
   handleUnsubscribe(
     @ConnectedSocket() client: Socket,
-    @MessageBody() payload: { symbol: string },
+    @MessageBody() payload: { symbol: string } | string,
   ) {
-    const { symbol } = payload;
-    if (!symbol) {
-      return { error: 'Symbol is required' };
+    try {
+      if (!this.server) {
+        this.logger.error('❌ Server not initialized');
+        return {
+          status: 'error',
+          message: 'Server not initialized',
+        };
+      }
+
+      // Handle both object and string payload formats
+      let symbol: string;
+      if (typeof payload === 'string') {
+        try {
+          const parsed = JSON.parse(payload);
+          symbol = parsed.symbol;
+        } catch {
+          symbol = payload;
+        }
+      } else if (payload && typeof payload === 'object') {
+        symbol = payload.symbol;
+      } else {
+        return {
+          status: 'error',
+          message: 'Invalid payload format. Expected { symbol: string }',
+        };
+      }
+
+      if (!symbol || typeof symbol !== 'string') {
+        return {
+          status: 'error',
+          message: 'Symbol is required',
+        };
+      }
+
+      const room = symbol.toUpperCase();
+      client.leave(room);
+      this.logger.log(`Client ${client.id} unsubscribed from ${room}`);
+
+      return {
+        status: 'success',
+        message: `Unsubscribed from ${room}`,
+      };
+    } catch (error) {
+      this.logger.error(
+        `❌ Error in handleUnsubscribe for client ${client.id}`,
+        error,
+      );
+      return {
+        status: 'error',
+        message:
+          error instanceof Error ? error.message : 'Internal server error',
+      };
     }
-
-    const room = symbol.toUpperCase();
-    client.leave(room);
-    this.logger.log(`Client ${client.id} unsubscribed from ${room}`);
-
-    return { success: true, message: `Unsubscribed from ${room}` };
   }
 
   broadcastPrice(symbol: string, data: PriceData) {
-    const room = symbol.toUpperCase();
-    this.server.to(room).emit('priceUpdate', {
-      symbol: data.symbol,
-      price: data.price,
-      ts: data.ts,
+    if (!this.server) return;
+
+    // Use volatile emit: if client can't receive, skip (no buffering)
+    // This prevents backpressure buildup for real-time price data
+    this.server.to(symbol.toUpperCase()).volatile.emit('priceUpdate', {
+      s: data.symbol,
+      p: data.price,
+      t: data.ts,
     });
-    this.logger.debug(`Broadcast price update to ${room}: ${data.price}`);
   }
 
   /**
@@ -81,14 +189,11 @@ export class PriceGateway implements OnGatewayConnection, OnGatewayDisconnect {
    * Used when clients need full OHLCV data for charting
    */
   broadcastKline(symbol: string, klineData: BinanceKlinePayload) {
-    const room = symbol.toUpperCase();
-    // Emit full kline data in Binance format for compatibility
-    this.server.to(room).emit('klineUpdate', {
-      e: klineData.e,
-      E: klineData.E,
-      s: klineData.s,
-      k: klineData.k,
-    });
-    this.logger.debug(`Broadcast kline update to ${room}: ${klineData.k.i}`);
+    if (!this.server) return;
+
+    // Use volatile emit for real-time data (drop if client can't keep up)
+    this.server
+      .to(symbol.toUpperCase())
+      .volatile.emit('klineUpdate', klineData);
   }
 }

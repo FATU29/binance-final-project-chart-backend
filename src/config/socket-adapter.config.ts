@@ -84,27 +84,26 @@ export class RedisIoAdapter extends IoAdapter {
   }
 
   createIOServer(port: number, options?: ServerOptions): any {
-    // Optimized Socket.IO options for high concurrency
+    // Optimized Socket.IO options for high concurrency & low latency
     const serverOptions: ServerOptions = {
       ...options,
-      // Performance optimizations
-      transports: ['websocket', 'polling'], // WebSocket preferred
-      pingInterval: 25000, // 25 seconds
-      pingTimeout: 60000, // 60 seconds
-      maxHttpBufferSize: 1e6, // 1MB max payload
+      // WebSocket-only: skip HTTP long-polling for lower latency
+      transports: ['websocket'],
+      // Tuned keep-alive: detect dead connections faster
+      pingInterval: 15000, // 15 seconds
+      pingTimeout: 10000, // 10 seconds
+      maxHttpBufferSize: 512 * 1024, // 512KB max payload (price data is small)
       perMessageDeflate: false, // Disable compression for lower CPU
+      // Disable HTTP upgrade timeout for faster connections
+      upgradeTimeout: 5000,
+      // Allow binary data for efficiency
+      allowEIO3: false,
 
       // CORS configuration
       cors: {
         origin: '*',
         credentials: false,
         methods: ['GET', 'POST'],
-      },
-
-      // Connection state recovery (Socket.IO v4.6+)
-      connectionStateRecovery: {
-        maxDisconnectionDuration: 2 * 60 * 1000, // 2 minutes
-        skipMiddlewares: true,
       },
     };
 
